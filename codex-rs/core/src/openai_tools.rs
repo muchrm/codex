@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use crate::client_common::Prompt;
-use crate::plan_tool::PLAN_TOOL;
+use crate::tools::CodexTool;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResponsesApiTool {
@@ -18,7 +18,7 @@ pub(crate) struct ResponsesApiTool {
 /// Responses API.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
-pub(crate) enum OpenAiTool {
+pub enum OpenAiTool {
     #[serde(rename = "function")]
     Function(ResponsesApiTool),
     #[serde(rename = "local_shell")]
@@ -43,7 +43,7 @@ pub(crate) enum JsonSchema {
 }
 
 /// Tool usage specification
-static DEFAULT_TOOLS: LazyLock<Vec<OpenAiTool>> = LazyLock::new(|| {
+pub(crate) static DEFAULT_SHELL_TOOL: LazyLock<OpenAiTool> = LazyLock::new(|| {
     let mut properties = BTreeMap::new();
     properties.insert(
         "command".to_string(),
@@ -54,7 +54,7 @@ static DEFAULT_TOOLS: LazyLock<Vec<OpenAiTool>> = LazyLock::new(|| {
     properties.insert("workdir".to_string(), JsonSchema::String);
     properties.insert("timeout".to_string(), JsonSchema::Number);
 
-    vec![OpenAiTool::Function(ResponsesApiTool {
+    OpenAiTool::Function(ResponsesApiTool {
         name: "shell",
         description: "Runs a shell command, and returns its output.",
         strict: false,
@@ -63,40 +63,30 @@ static DEFAULT_TOOLS: LazyLock<Vec<OpenAiTool>> = LazyLock::new(|| {
             required: &["command"],
             additional_properties: false,
         },
-    })]
+    })
 });
-
-static DEFAULT_CODEX_MODEL_TOOLS: LazyLock<Vec<OpenAiTool>> =
-    LazyLock::new(|| vec![OpenAiTool::LocalShell {}]);
 
 /// Returns JSON values that are compatible with Function Calling in the
 /// Responses API:
 /// https://platform.openai.com/docs/guides/function-calling?api-mode=responses
 pub(crate) fn create_tools_json_for_responses_api(
-    prompt: &Prompt,
-    model: &str,
-    include_plan_tool: bool,
+    tools: &Vec<CodexTool>,
 ) -> crate::error::Result<Vec<serde_json::Value>> {
-    // Assemble tool list: built-in tools + any extra tools from the prompt.
-    let default_tools = if model.starts_with("codex") {
-        &DEFAULT_CODEX_MODEL_TOOLS
-    } else {
-        &DEFAULT_TOOLS
-    };
-    let mut tools_json = Vec::with_capacity(default_tools.len() + prompt.extra_tools.len());
-    for t in default_tools.iter() {
-        tools_json.push(serde_json::to_value(t)?);
-    }
-    tools_json.extend(
-        prompt
-            .extra_tools
-            .clone()
-            .into_iter()
-            .map(|(name, tool)| mcp_tool_to_openai_tool(name, tool)),
-    );
-
-    if include_plan_tool {
-        tools_json.push(serde_json::to_value(PLAN_TOOL.clone())?);
+    let mut tools_json = Vec::new();
+    for tool in tools {
+        match tool {
+            CodexTool::OpenAiTool(tool) => {
+                tools_json.push(serde_json::to_value(tool)?);
+            }
+            CodexTool::McpTool {
+                fully_qualified_name,
+                tool,
+            } => {
+                let openai_tool =
+                    mcp_tool_to_openai_tool(fully_qualified_name.clone(), *tool.clone());
+                tools_json.push(openai_tool);
+            }
+        }
     }
 
     Ok(tools_json)
@@ -107,13 +97,10 @@ pub(crate) fn create_tools_json_for_responses_api(
 /// https://platform.openai.com/docs/guides/function-calling?api-mode=chat
 pub(crate) fn create_tools_json_for_chat_completions_api(
     prompt: &Prompt,
-    model: &str,
-    include_plan_tool: bool,
 ) -> crate::error::Result<Vec<serde_json::Value>> {
     // We start with the JSON for the Responses API and than rewrite it to match
     // the chat completions tool call format.
-    let responses_api_tools_json =
-        create_tools_json_for_responses_api(prompt, model, include_plan_tool)?;
+    let responses_api_tools_json = create_tools_json_for_responses_api(&prompt.tools)?;
     let tools_json = responses_api_tools_json
         .into_iter()
         .filter_map(|mut tool| {
