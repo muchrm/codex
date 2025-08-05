@@ -35,6 +35,20 @@ impl OllamaClient {
         Self::from_provider(base_url, provider.wire_api)
     }
 
+    /// Construct a client for the built‑in open‑source ("oss") model provider
+    /// and verify that a local Ollama server is reachable. If no server is
+    /// detected, returns an error with helpful installation/run instructions.
+    pub async fn try_from_oss_provider() -> io::Result<Self> {
+        let client = Self::from_oss_provider();
+        if client.probe_server().await? {
+            Ok(client)
+        } else {
+            Err(io::Error::other(
+                "No running Ollama server detected. Start it with: `ollama serve` (after installing). Install instructions: https://github.com/ollama/ollama?tab=readme-ov-file#ollama",
+            ))
+        }
+    }
+
     /// Build a client from a provider definition. Falls back to the default
     /// local URL if no base_url is configured.
     fn from_provider(base_url: &str, wire_api: WireApi) -> Self {
@@ -186,6 +200,34 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
 
+    /// Simple RAII guard to set an environment variable for the duration of a test
+    /// and restore the previous value (or remove it) on drop to avoid cross-test
+    /// interference.
+    struct EnvVarGuard {
+        key: String,
+        prev: Option<String>,
+    }
+    impl EnvVarGuard {
+        fn set(key: &str, value: String) -> Self {
+            let prev = std::env::var(key).ok();
+            // set_var is safe but we mirror existing tests that use an unsafe block
+            // to silence edition lints around global mutation during tests.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
     // Happy-path tests using a mock HTTP server; skip if sandbox network is disabled.
     #[tokio::test]
     async fn test_fetch_models_happy_path() {
@@ -245,7 +287,63 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(200))
             .mount(&server)
             .await;
+        // Ensure the built-in OSS provider points at our mock server for this test
+        // to avoid depending on any globally configured environment from other tests.
+        let _guard = EnvVarGuard::set("CODEX_OSS_BASE_URL", format!("{}/v1", server.uri()));
         let ollama_client = OllamaClient::from_oss_provider();
         assert!(ollama_client.probe_server().await.expect("probe compat"));
+    }
+
+    #[tokio::test]
+    async fn test_try_from_oss_provider_ok_when_server_running() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+            tracing::info!(
+                "{} set; skipping test_try_from_oss_provider_ok_when_server_running",
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+            );
+            return;
+        }
+
+        let server = wiremock::MockServer::start().await;
+        // Configure built‑in `oss` provider to point at this mock server.
+        // set_var is unsafe on Rust 2024 edition; use unsafe block in tests.
+        let _guard = EnvVarGuard::set("CODEX_OSS_BASE_URL", format!("{}/v1", server.uri()));
+
+        // OpenAI‑compat models endpoint responds OK.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/models"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let _client = OllamaClient::try_from_oss_provider()
+            .await
+            .expect("client should be created when probe succeeds");
+    }
+
+    #[tokio::test]
+    async fn test_try_from_oss_provider_err_when_server_missing() {
+        if std::env::var(codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+            tracing::info!(
+                "{} set; skipping test_try_from_oss_provider_err_when_server_missing",
+                codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR
+            );
+            return;
+        }
+
+        let server = wiremock::MockServer::start().await;
+        // Point oss provider at our mock server but do NOT set up a handler
+        // for /v1/models so the request returns a non‑success status.
+        unsafe { std::env::set_var("CODEX_OSS_BASE_URL", format!("{}/v1", server.uri())) };
+
+        let err = OllamaClient::try_from_oss_provider()
+            .await
+            .err()
+            .expect("expected error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No running Ollama server detected."),
+            "msg = {msg}"
+        );
     }
 }

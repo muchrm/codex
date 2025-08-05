@@ -201,6 +201,13 @@ pub async fn run_main(
         std::io::stdout().write_all(b"Login successful.\n")?;
     }
 
+    // If the user selected the local OSS provider, proactively verify a
+    // local Ollama server is running so we can provide a helpful message.
+    if cli.oss {
+        // If the probe fails, surface a clear instruction to start/install Ollama.
+        codex_ollama::OllamaClient::try_from_oss_provider().await?;
+    }
+
     // Determine whether we need to display the "not a git repo" warning
     // modal. The flag is shown when the current working directory is *not*
     // inside a Git repository **and** the user did *not* pass the
