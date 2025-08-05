@@ -10,7 +10,6 @@ use codex_core::config_types::SandboxMode;
 use codex_core::protocol::AskForApproval;
 use codex_core::util::is_inside_git_repo;
 use codex_login::load_auth;
-use futures_util::StreamExt;
 use log_layer::TuiLogLayer;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -80,13 +79,13 @@ pub async fn run_main(
     let config = {
         // Load configuration and support CLI overrides.
         let overrides = ConfigOverrides {
-            // When using the local OSS provider, default to the recommended
-            // open‑source model if the user did not explicitly pass -m.
+            // When using `--oss`, let the bootstrapper pick the model
+            // (defaulting to llama3.2:3b) and ensure it is present locally.
             model: if cli.oss {
                 Some(
-                    cli.model
-                        .clone()
-                        .unwrap_or_else(|| "llama3.2:3b".to_string()),
+                    codex_ollama::ensure_oss_ready(cli.model.clone())
+                        .await
+                        .map_err(|e| std::io::Error::other(format!("OSS setup failed: {e}")))?,
                 )
             } else {
                 cli.model.clone()
@@ -210,36 +209,6 @@ pub async fn run_main(
         codex_login::login_with_chatgpt(&config.codex_home, false).await?;
 
         std::io::stdout().write_all(b"Login successful.\n")?;
-    }
-
-    // If the user selected the local OSS provider, proactively verify a
-    // local Ollama server is running so we can provide a helpful message.
-    if cli.oss {
-        // If the probe fails, surface a clear instruction to start/install Ollama.
-        let ollama_client = codex_ollama::OllamaClient::try_from_oss_provider().await?;
-
-        // Ensure the selected model is available locally; if not, pull it.
-        let selected_model = config.model.clone();
-        match ollama_client.fetch_models().await {
-            Ok(models) => {
-                if !models.iter().any(|m| m == &selected_model) {
-                    println!(
-                        "Model '{}' not found locally. Downloading via Ollama...",
-                        selected_model
-                    );
-                    if let Ok(mut stream) = ollama_client.pull_model_stream(&selected_model).await {
-                        while let Some(_evt) = stream.next().await {}
-                        println!("Model '{}' downloaded successfully.", selected_model);
-                    }
-                }
-            }
-            Err(err) => {
-                println!(
-                    "Failed to query local models from Ollama: {}. Will attempt to continue.",
-                    err
-                );
-            }
-        }
     }
 
     // Determine whether we need to display the "not a git repo" warning
