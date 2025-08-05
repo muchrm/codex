@@ -872,6 +872,7 @@ dependencies = [
  "codex-ollama",
  "color-eyre",
  "crossterm",
+ "futures-util",
  "image",
  "insta",
  "lazy_static",
