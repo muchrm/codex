@@ -80,7 +80,7 @@ pub async fn run_main(
         // Load configuration and support CLI overrides.
         let overrides = ConfigOverrides {
             // When using `--oss`, let the bootstrapper pick the model
-            // (defaulting to llama3.2:3b) and ensure it is present locally.
+            // (defaulting to gpt-oss:20b) and ensure it is present locally.
             model: if cli.oss {
                 Some(
                     codex_ollama::ensure_oss_ready(cli.model.clone())
@@ -98,6 +98,8 @@ pub async fn run_main(
             codex_linux_sandbox_exe,
             base_instructions: None,
             include_plan_tool: Some(true),
+            default_disable_response_storage: cli.oss.then_some(true),
+            default_show_raw_agent_reasoning: cli.oss.then_some(true),
         };
         // Parse `-c` overrides from the CLI.
         let cli_kv_overrides = match cli.config_overrides.parse_overrides() {

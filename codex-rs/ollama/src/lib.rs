@@ -10,7 +10,7 @@ pub use pull::PullProgressReporter;
 pub use pull::TuiProgressReporter;
 
 /// Default OSS model to use when `--oss` is passed without an explicit `-m`.
-pub const DEFAULT_OSS_MODEL: &str = "llama3.2:3b";
+pub const DEFAULT_OSS_MODEL: &str = "gpt-oss:20b";
 
 /// Prepare the local OSS environment when `--oss` is selected.
 ///
